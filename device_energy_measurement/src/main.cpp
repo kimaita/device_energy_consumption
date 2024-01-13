@@ -24,12 +24,12 @@ double VRMS = 0;
 double AmpsRMS = 0;
 
 // The MQTT topics that this device should publish/subscribe
-#define AWS_IOT_PUBLISH_TOPIC "device_energy/pub"
+#define AWS_IOT_PUBLISH_TOPIC "device_energy/readings/acs_000"
 #define AWS_IOT_SUBSCRIBE_TOPIC "device_energy/sub"
 #define GMT_OFFSET 3
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, GMT_OFFSET*3600);
+NTPClient timeClient(ntpUDP, GMT_OFFSET * 3600);
 
 /* WiFi */
 WiFiClientSecure net;
@@ -43,18 +43,19 @@ PubSubClient client(net);
 time_t now;
 time_t nowish = 1510592825;
 unsigned long lastMillis = 0;
+long watt_hours = 0;
 
 /* Function Declarations*/
 float getVPP();
 void NTPConnect(void);
 void messageHandler(char *topic, byte *payload, unsigned int length);
 void connectAWS();
-void publishMessage(reading power);
+bool publishReading(reading power);
 reading get_readings();
 
 void setup()
 {
-	Serial.begin(9600);
+	Serial.begin(115200);
 	pinMode(sensorIn, INPUT);
 	connectAWS();
 	// WiFi.mode(WIFI_OFF)
@@ -64,30 +65,28 @@ void setup()
 
 void loop()
 {
-	reading r = get_readings();
 	timeClient.update();
-	Serial.print(r.Irms, 4);
-	Serial.print("A  ---  ");
-	Serial.print(r.watts);
-	Serial.println(" W");
-	delay(100);
+	reading r = get_readings();
 
-	now = time(nullptr);
-
-	if (!client.connected())
+	if (!client.loop())
 	{
+		Serial.println("PubSub Client not connected " + client.state());
 		connectAWS();
 	}
 	else
 	{
-		client.loop();
-		publishMessage(r);
+		if (publishReading(r))
+		{
+			Serial.print("Published reading ");
+			Serial.println(r.time);
+		}
 	}
+	delay(500);
 }
 
 void NTPConnect(void)
 {
-	Serial.print("Setting time using SNTP");
+	Serial.print("Setting time using SNTP ");
 	configTime(GMT_OFFSET * 3600, 0 * 3600, "pool.ntp.org", "time.nist.gov");
 	now = time(nullptr);
 	while (now < nowish)
@@ -103,58 +102,70 @@ void NTPConnect(void)
 	Serial.print(asctime(&timeinfo));
 }
 
-void connectAWS()
+void connect_wifi()
 {
 	WiFi.mode(WIFI_STA);
 	WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
-	Serial.println("Connecting to Wi-Fi" + String(WIFI_SSID));
+	Serial.println("Connecting to Wi-Fi: " + String(WIFI_SSID));
 
 	while (WiFi.status() != WL_CONNECTED)
 	{
 		delay(500);
 		Serial.println("trying wifi...");
 	}
+}
 
-	NTPConnect();
+void connectAWS()
+{
 
-	net.setTrustAnchors(&cert);
-	net.setClientRSACert(&client_cert, &key);
-
-	// Connect to the MQTT broker on the AWS endpoint we defined earlier
-	client.setServer(AWS_IOT_ENDPOINT, 8883).setCallback(messageHandler);
+	if (WiFi.status() != WL_CONNECTED)
+		connect_wifi();
 
 	Serial.println("Connecting to AWS IOT");
-
-	while (!client.connect(THINGNAME))
+	if (client.connected())
 	{
-		Serial.println("trying aws IoT...");
-		Serial.print(client.state());
-		delay(500);
+		Serial.println("AWS IoT Connected!");
+		return;
 	}
+	else
+	{
+		NTPConnect();
 
+		net.setTrustAnchors(&cert);
+		net.setClientRSACert(&client_cert, &key);
+
+		// Connect to the MQTT broker on the AWS endpoint we defined earlier
+		client.setServer(AWS_IOT_ENDPOINT, 8883).setCallback(messageHandler);
+
+		while (!client.connect(THINGNAME))
+		{
+			Serial.println("trying aws IoT...");
+			Serial.print(client.state());
+			delay(500);
+		}
+		Serial.println("AWS IoT Connected!");
+	}
 	if (!client.connected())
 	{
 		Serial.println("AWS IoT Timeout!");
 		return;
 	}
-
 	// Subscribe to a topic
-	client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
-
-	Serial.println("AWS IoT Connected!");
+	// client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
 }
 
-void publishMessage(reading r)
+boolean publishReading(reading r)
 {
 	StaticJsonDocument<200> doc;
 	doc["time"] = r.time;
 	doc["rms_current"] = r.Irms;
 	doc["power"] = r.watts;
+	doc["watt_hours"] = r.watt_hours;
 	char jsonBuffer[512];
-	serializeJson(doc, jsonBuffer); // print to client
-
-	client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
+	serializeJson(doc, jsonBuffer); 
+	// print to client	
+	return client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
 }
 
 void messageHandler(char *topic, byte *payload, unsigned int length)
@@ -190,7 +201,7 @@ float getVPP()
 			/*record the minimum sensor value*/
 			minValue = readValue;
 		}
-		delay(5);
+		delay(10);
 	}
 
 	// Subtract min from max
@@ -202,17 +213,28 @@ float getVPP()
 reading get_readings()
 {
 	reading read;
+	long energy = 0, c_wh = 0;
 
 	Voltage = getVPP();
 	VRMS = (Voltage / 2.0) * 0.707;
 	AmpsRMS = ((VRMS * 1000) / mVperAmp) - error;
 	Watt = (AmpsRMS * 240);
-
+	if (lastMillis == 0)
+	{
+		lastMillis = millis();
+	}
+	else
+	{
+		energy = Watt * (millis() - lastMillis);
+		c_wh = energy / (216000);
+		watt_hours += c_wh;
+	}
 	time_t epochTime = timeClient.getEpochTime();
-	
+
 	read.time = epochTime;
 	read.Irms = AmpsRMS;
 	read.watts = Watt;
+	read.watt_hours = watt_hours;
 
 	return read;
 }
