@@ -10,11 +10,11 @@
 #include <NTPClient.h>
 
 /* ESP */
-const int sensorIn = A0;	   // pin where the OUT pin from sensor is connected on Arduino
+#define sensorIn A0	   // pin where the OUT pin from sensor is connected
 float resolution = 3.3 / 1024; // Input Voltage Range is 1V to 3.3V
 
 /* ACS712 Sensor */
-const double error = 0.035;
+const double error = 0.075; //wifi connected noise? + sensor at no load
 int mVperAmp = 100; // 100 for 20A Module
 
 /* Current and Power */
@@ -41,32 +41,52 @@ BearSSL::X509List cert(AWS_CERT_CA);
 PubSubClient client(net);
 
 time_t now;
-time_t nowish = 1510592825;
+time_t nowish = 1705244380;
 unsigned long lastMillis = 0;
-long watt_hours = 0;
+float watt_hours = 0;
+uint32_t period = 1000000 / 60; // One period of a 60Hz periodic waveform
+uint32_t t_start = 0;
+float zero_ADC_Value = 0;
 
 /* Function Declarations*/
 float getVPP();
+void connect_wifi();
 void NTPConnect(void);
-void messageHandler(char *topic, byte *payload, unsigned int length);
 void connectAWS();
 bool publishReading(reading power);
 reading get_readings();
 
 void setup()
 {
-	Serial.begin(115200);
+	Serial.begin(9600);
 	pinMode(sensorIn, INPUT);
 	connectAWS();
 	// WiFi.mode(WIFI_OFF)
 	wifi_set_sleep_type(NONE_SLEEP_T);
 	timeClient.begin();
+
+	t_start = micros();
+	uint32_t ADC_SUM = 0, n = 0;
+	while (micros() - t_start < period)
+	{
+		ADC_SUM += analogRead(sensorIn);
+		n++;
+	}
+	zero_ADC_Value = ADC_SUM / n;
 }
 
 void loop()
 {
 	timeClient.update();
 	reading r = get_readings();
+
+	Serial.print(r.Irms, 6);
+	Serial.println(" Amps");
+	Serial.print(r.watts, 4);
+	Serial.println(" Watts");
+	Serial.print(r.watt_hours);
+	Serial.println(" Wh");
+	Serial.println("-----");
 
 	if (!client.loop())
 	{
@@ -77,11 +97,10 @@ void loop()
 	{
 		if (publishReading(r))
 		{
-			Serial.print("Published reading ");
-			Serial.println(r.time);
+			Serial.print("Published reading for "); Serial.println(r.time);
 		}
 	}
-	delay(500);
+	delay(100);
 }
 
 void NTPConnect(void)
@@ -98,8 +117,6 @@ void NTPConnect(void)
 	Serial.println("done!");
 	struct tm timeinfo;
 	gmtime_r(&now, &timeinfo);
-	Serial.print("Current time: ");
-	Serial.print(asctime(&timeinfo));
 }
 
 void connect_wifi()
@@ -136,7 +153,7 @@ void connectAWS()
 		net.setClientRSACert(&client_cert, &key);
 
 		// Connect to the MQTT broker on the AWS endpoint we defined earlier
-		client.setServer(AWS_IOT_ENDPOINT, 8883).setCallback(messageHandler);
+		client.setServer(AWS_IOT_ENDPOINT, 8883);
 
 		while (!client.connect(THINGNAME))
 		{
@@ -150,9 +167,7 @@ void connectAWS()
 	{
 		Serial.println("AWS IoT Timeout!");
 		return;
-	}
-	// Subscribe to a topic
-	// client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
+	}	
 }
 
 boolean publishReading(reading r)
@@ -163,20 +178,9 @@ boolean publishReading(reading r)
 	doc["power"] = r.watts;
 	doc["watt_hours"] = r.watt_hours;
 	char jsonBuffer[512];
-	serializeJson(doc, jsonBuffer); 
-	// print to client	
+	serializeJson(doc, jsonBuffer);
+	// print to client
 	return client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer);
-}
-
-void messageHandler(char *topic, byte *payload, unsigned int length)
-{
-	Serial.print("incoming: ");
-	Serial.println(topic);
-
-	StaticJsonDocument<200> doc;
-	deserializeJson(doc, payload);
-	const char *message = doc["message"];
-	Serial.println(message);
 }
 
 float getVPP()
@@ -189,7 +193,8 @@ float getVPP()
 	uint32_t start_time = millis();
 	while ((millis() - start_time) < 1000) // sample for 1 Sec
 	{
-		readValue = analogRead(sensorIn);
+		readValue = analogRead(sensorIn) - zero_ADC_Value;
+		
 		// see if you have a new maxValue
 		if (readValue > maxValue)
 		{
@@ -201,7 +206,7 @@ float getVPP()
 			/*record the minimum sensor value*/
 			minValue = readValue;
 		}
-		delay(10);
+		delay(5);
 	}
 
 	// Subtract min from max
@@ -213,22 +218,23 @@ float getVPP()
 reading get_readings()
 {
 	reading read;
-	long energy = 0, c_wh = 0;
+	float energy = 0;
+	float c_wh = 0.0;
 
 	Voltage = getVPP();
 	VRMS = (Voltage / 2.0) * 0.707;
 	AmpsRMS = ((VRMS * 1000) / mVperAmp) - error;
+	AmpsRMS = (AmpsRMS < 0.035) ? 0.0 : AmpsRMS;
 	Watt = (AmpsRMS * 240);
-	if (lastMillis == 0)
-	{
-		lastMillis = millis();
-	}
-	else
+	
+	if (lastMillis != 0)
 	{
 		energy = Watt * (millis() - lastMillis);
-		c_wh = energy / (216000);
+		//weird data type thing here
+		c_wh = energy / 3600000.0;		
 		watt_hours += c_wh;
 	}
+	lastMillis = millis();
 	time_t epochTime = timeClient.getEpochTime();
 
 	read.time = epochTime;
