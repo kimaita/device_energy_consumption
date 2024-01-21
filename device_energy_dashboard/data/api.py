@@ -76,7 +76,6 @@ class API:
         Returns:
             List: _description_
         """
-        millis = round(time.time() * 1000)
         
         return self.db.get_latest_readings(past_hrs_millis(past_hours))
     
@@ -122,7 +121,8 @@ class API:
             _type_: _description_
         """
         df = self.getReadingsInPastHrs(past_hours)
-        return df.query("reading_time>=@stop")['readings.watt_hours'].sum()/1000
+        print(df.columns)
+        return df.query("reading_time>=@stop")['watt_hours'].sum()/1000
 
 
 

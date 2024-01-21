@@ -141,18 +141,7 @@ rt_slider_view = html.Div(
 )
 
 rt_energy_text = html.Div(
-    [
-        html.H5(
-            "kWh"
-        ),
-        html.Hr(),
-        html.P(
-            "0.0",
-            id='rt_energy_wh',
-        ),
-
-    ]
-
+    id='rt_energy_wh',
 )
 
 rt_graph = dcc.Graph(
@@ -258,7 +247,7 @@ app.layout = html.Div(
 ])
 def update_rt_graph(n, dev, period):
 
-    df = api.getReadingsInPastHrs(period).query()
+    df = api.getReadingsInPastHrs(period)
 
     trace = dict(
         type="scatter",
@@ -284,7 +273,7 @@ def update_rt_graph(n, dev, period):
             # "range": [0, max(100, max(df["readings.watt_hours"]))],
             "showgrid": True,
             "showline": True,
-            "fixedrange": True,
+            # "fixedrange": True,
             # "gridcolor": app_color["graph_line"],
             # "nticks": max(6, round(df["Speed"].iloc[-1] / 10)),
         },
@@ -300,7 +289,11 @@ def update_rt_graph(n, dev, period):
               Input('rt_slider', 'value'),
 ])
 def update_rt_stats(n, device, period):
-    return api.getRealtimeKWh(period)
+    kwh = api.getRealtimeKWh(period)
+    
+    return [html.H5("kWh"),
+            html.Hr(),
+            html.P(f"{kwh}")]
 
 
 @app.callback(
